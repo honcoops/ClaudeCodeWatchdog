@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "polling": {
+    "intervalSeconds": 120,
+    "maxConcurrentProjects": 10
+  },
+  "logging": {
+    "level": "Info",
+    "maxLogAgeDays": 7,
+    "maxLogSizeMB": 10
+  },
+  "notifications": {
+    "enabled": true,
+    "maxPerHour": 10
+  },
+  "api": {
+    "enabled": false,
+    "model": "claude-3-5-sonnet-20241022",
+    "maxTokens": 1000,
+    "temperature": 0.7,
+    "dailyCostLimit": 10.0,
+    "weeklyCostLimit": 50.0
+  },
+  "windowsMCP": {
+    "maxRetries": 3,
+    "retryDelaySeconds": 2,
+    "visionMode": false
+  }
+}
