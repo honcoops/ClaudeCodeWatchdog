@@ -20,7 +20,8 @@
 
 .NOTES
     Part of the Claude Code Watchdog project
-    Workstream: WS01 - Core Infrastructure
+    Workstream: WS05 - Project Management
+    Enhanced: WI-3.2 (Concurrent Processing) & WI-3.6 (Session Recovery)
 #>
 
 [CmdletBinding()]
@@ -29,7 +30,10 @@ param(
     [int]$PollingInterval = 120,
 
     [Parameter()]
-    [int]$MaxRunDuration = 0
+    [int]$MaxRunDuration = 0,
+
+    [Parameter()]
+    [switch]$SkipRecovery
 )
 
 # Import required modules
@@ -66,15 +70,26 @@ function Start-Watchdog {
         # Set global running flag
         $global:WatchdogRunning = $true
         $startTime = Get-Date
+        $global:WatchdogStartTime = $startTime
+
+        # Initialize resource monitoring (WI-3.2)
+        Initialize-ResourceMonitoring
 
         # Register shutdown handler
         Register-ShutdownHandler
 
+        # Attempt session recovery (WI-3.6)
+        if (-not $SkipRecovery) {
+            Restore-WatchdogSessions
+        }
+
         Write-Host "✅ Watchdog initialized. Polling every $PollingIntervalSeconds seconds" -ForegroundColor Green
-        Write-WatchdogLog -Message "Watchdog started" -Level "Info"
+        Write-WatchdogLog -Message "Watchdog started (Recovery: $(-not $SkipRecovery))" -Level "Info"
 
         # Main loop
         while ($global:WatchdogRunning) {
+            $cycleStartTime = Get-Date
+
             try {
                 # Check max runtime
                 if ($MaxRunHours -gt 0) {
@@ -84,6 +99,9 @@ function Start-Watchdog {
                         break
                     }
                 }
+
+                # Measure resource usage before processing (WI-3.2)
+                $preProcessResources = Measure-ResourceUsage
 
                 # Get active projects
                 $projects = Get-ActiveProjects
@@ -104,8 +122,17 @@ function Start-Watchdog {
                     }
                 }
 
+                # Measure resource usage after processing (WI-3.2)
+                $postProcessResources = Measure-ResourceUsage
+                Update-ResourceMetrics -PreProcess $preProcessResources -PostProcess $postProcessResources
+
                 # Update heartbeat
                 Update-Heartbeat
+
+                # Calculate cycle time and adjust sleep if needed (WI-3.2)
+                $cycleTime = ((Get-Date) - $cycleStartTime).TotalSeconds
+                $global:WatchdogStats.LastCycleDuration = $cycleTime
+                $global:WatchdogStats.CyclesCompleted++
 
                 # Sleep until next cycle
                 Start-Sleep -Seconds $PollingIntervalSeconds
@@ -119,6 +146,10 @@ function Start-Watchdog {
 
         # Cleanup
         Write-Host "`n🛑 Shutting down watchdog..." -ForegroundColor Yellow
+
+        # Persist state before shutdown (WI-3.6)
+        Save-WatchdogState
+
         Cleanup-WatchdogResources
         Write-Host "✅ Watchdog stopped cleanly" -ForegroundColor Green
     }
@@ -144,8 +175,32 @@ function Process-Project {
         # Step 1: Find Claude Code session for this project
         $session = Find-ClaudeCodeSession -ProjectName $Project.Name
 
+        # Session loss detection (WI-3.6)
         if (-not $session) {
-            Write-Verbose "No active session found for $($Project.Name)"
+            # Check if we previously had a session
+            $projectState = Get-ProjectState -ProjectName $Project.Name
+
+            if ($projectState -and $projectState.sessionId) {
+                # Session was lost
+                Write-Host "    ⚠️  Session lost (was: $($projectState.sessionId))" -ForegroundColor Yellow
+                Write-WatchdogLog -Message "Session lost for project $($Project.Name)" -Level "Warning"
+
+                # Notify user
+                Send-Notification -Title "Session Lost" `
+                    -Message "Claude Code session for '$($Project.Name)' has closed or crashed" `
+                    -ProjectName $Project.Name
+
+                # Update state to reflect session loss
+                Update-ProjectState -ProjectName $Project.Name -StateUpdates @{
+                    status = "SessionLost"
+                    lastActivity = (Get-Date).ToString("o")
+                    sessionId = $null
+                }
+            }
+            else {
+                Write-Verbose "No active session found for $($Project.Name)"
+            }
+
             return
         }
 
@@ -342,6 +397,99 @@ function Find-SkillForError {
     return $null
 }
 
+function Initialize-ResourceMonitoring {
+    <#
+    .SYNOPSIS
+        Initializes resource monitoring for WI-3.2
+    #>
+
+    $global:WatchdogStats.CyclesCompleted = 0
+    $global:WatchdogStats.LastCycleDuration = 0
+    $global:WatchdogStats.AverageCpuPercent = 0
+    $global:WatchdogStats.PeakMemoryMB = 0
+    $global:WatchdogStats.ResourceSamples = @()
+
+    Write-Verbose "Resource monitoring initialized"
+}
+
+function Measure-ResourceUsage {
+    <#
+    .SYNOPSIS
+        Measures current resource usage (WI-3.2)
+    #>
+
+    try {
+        $process = Get-Process -Id $PID -ErrorAction SilentlyContinue
+
+        if ($process) {
+            return @{
+                CpuTime = $process.CPU
+                WorkingSetMB = [math]::Round($process.WorkingSet64 / 1MB, 2)
+                Timestamp = Get-Date
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Failed to measure resources: $_"
+    }
+
+    return @{
+        CpuTime = 0
+        WorkingSetMB = 0
+        Timestamp = Get-Date
+    }
+}
+
+function Update-ResourceMetrics {
+    <#
+    .SYNOPSIS
+        Updates resource usage metrics (WI-3.2)
+    #>
+    param(
+        [hashtable]$PreProcess,
+        [hashtable]$PostProcess
+    )
+
+    try {
+        # Calculate CPU usage percentage
+        $cpuDelta = $PostProcess.CpuTime - $PreProcess.CpuTime
+        $timeDelta = ($PostProcess.Timestamp - $PreProcess.Timestamp).TotalSeconds
+
+        if ($timeDelta -gt 0) {
+            $cpuPercent = ($cpuDelta / $timeDelta) * 100
+            $global:WatchdogStats.AverageCpuPercent = $cpuPercent
+        }
+
+        # Track peak memory
+        if ($PostProcess.WorkingSetMB -gt $global:WatchdogStats.PeakMemoryMB) {
+            $global:WatchdogStats.PeakMemoryMB = $PostProcess.WorkingSetMB
+        }
+
+        # Keep last 100 samples for trending
+        $sample = @{
+            Timestamp = $PostProcess.Timestamp
+            CpuPercent = $cpuPercent
+            MemoryMB = $PostProcess.WorkingSetMB
+        }
+
+        $global:WatchdogStats.ResourceSamples += $sample
+
+        if ($global:WatchdogStats.ResourceSamples.Count -gt 100) {
+            $global:WatchdogStats.ResourceSamples = $global:WatchdogStats.ResourceSamples[-100..-1]
+        }
+
+        # Log if resource usage is high
+        if ($cpuPercent -gt 5.0) {
+            Write-WatchdogLog -Message "High CPU usage detected: $([math]::Round($cpuPercent, 2))%" -Level "Warning"
+        }
+
+        Write-Verbose "Resource usage - CPU: $([math]::Round($cpuPercent, 2))%, Memory: $($PostProcess.WorkingSetMB)MB"
+    }
+    catch {
+        Write-Verbose "Failed to update resource metrics: $_"
+    }
+}
+
 function Register-ShutdownHandler {
     <#
     .SYNOPSIS
@@ -350,6 +498,151 @@ function Register-ShutdownHandler {
 
     $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
         $global:WatchdogRunning = $false
+    }
+}
+
+function Restore-WatchdogSessions {
+    <#
+    .SYNOPSIS
+        Attempts to restore sessions from previous run (WI-3.6)
+    #>
+
+    $recoveryStatePath = "$HOME/.claude-automation/state/watchdog-recovery.json"
+
+    if (-not (Test-Path $recoveryStatePath)) {
+        Write-Verbose "No recovery state found"
+        return
+    }
+
+    try {
+        Write-Host "🔄 Attempting session recovery..." -ForegroundColor Cyan
+
+        $recoveryState = Get-Content $recoveryStatePath -Raw | ConvertFrom-Json
+
+        # Check if recovery state is recent (within last 24 hours)
+        $savedTime = [DateTime]::Parse($recoveryState.SavedAt)
+        $timeSinceSave = (Get-Date) - $savedTime
+
+        if ($timeSinceSave.TotalHours -gt 24) {
+            Write-Host "  ⚠️  Recovery state too old ($([math]::Round($timeSinceSave.TotalHours, 1))h). Skipping..." -ForegroundColor Yellow
+            return
+        }
+
+        Write-Host "  📁 Recovery state from $($savedTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Gray
+
+        $recoveredCount = 0
+        $failedCount = 0
+
+        foreach ($projectState in $recoveryState.Projects) {
+            try {
+                # Restore project state
+                $projectName = $projectState.ProjectName
+
+                Write-Host "  🔧 Restoring: $projectName..." -ForegroundColor Gray
+
+                # Check if project still registered
+                $projects = Get-RegisteredProjects
+                $project = $projects | Where-Object { $_.Name -eq $projectName }
+
+                if (-not $project) {
+                    Write-Warning "  Project '$projectName' no longer registered. Skipping..."
+                    $failedCount++
+                    continue
+                }
+
+                # Restore state if session is still active
+                $session = Find-ClaudeCodeSession -ProjectName $projectName
+
+                if ($session) {
+                    Write-Host "    ✅ Session found - state restored" -ForegroundColor Green
+                    $recoveredCount++
+
+                    # Update registry with restored session
+                    Update-RegistrySessionId -ProjectName $projectName -SessionId $session.SessionId
+
+                    # Send recovery notification
+                    Send-Notification -Title "Session Recovered" -Message "Project '$projectName' session recovered successfully" -ProjectName $projectName
+                }
+                else {
+                    Write-Verbose "  Session for '$projectName' not found - may have closed"
+                    $failedCount++
+                }
+            }
+            catch {
+                Write-Warning "  Failed to restore project $($projectState.ProjectName): $_"
+                $failedCount++
+            }
+        }
+
+        Write-Host "  📊 Recovery complete: $recoveredCount restored, $failedCount unavailable" -ForegroundColor Cyan
+        Write-WatchdogLog -Message "Session recovery: $recoveredCount restored, $failedCount failed" -Level "Info"
+
+        # Clean up old recovery file
+        Remove-Item $recoveryStatePath -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Warning "Session recovery failed: $_"
+        Write-WatchdogLog -Message "Session recovery error: $_" -Level "Error"
+    }
+}
+
+function Save-WatchdogState {
+    <#
+    .SYNOPSIS
+        Saves watchdog state for recovery (WI-3.6)
+    #>
+
+    $recoveryStatePath = "$HOME/.claude-automation/state/watchdog-recovery.json"
+
+    try {
+        Write-Verbose "Saving watchdog state for recovery..."
+
+        # Get all active projects
+        $projects = Get-ActiveProjects
+
+        $projectStates = @()
+
+        foreach ($project in $projects) {
+            try {
+                # Get current session if available
+                $session = Find-ClaudeCodeSession -ProjectName $project.Name
+
+                if ($session) {
+                    $projectState = @{
+                        ProjectName = $project.Name
+                        SessionId = $session.SessionId
+                        LastActive = (Get-Date).ToString("o")
+                    }
+
+                    $projectStates += $projectState
+                }
+            }
+            catch {
+                Write-Verbose "Failed to save state for $($project.Name): $_"
+            }
+        }
+
+        $recoveryState = @{
+            SavedAt = (Get-Date).ToString("o")
+            Projects = $projectStates
+            Statistics = $global:WatchdogStats
+        }
+
+        # Ensure directory exists
+        $stateDir = Split-Path $recoveryStatePath
+        if (-not (Test-Path $stateDir)) {
+            New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+        }
+
+        # Save recovery state
+        $recoveryState | ConvertTo-Json -Depth 10 | Set-Content $recoveryStatePath -Force
+
+        Write-Verbose "Watchdog state saved successfully ($($projectStates.Count) projects)"
+        Write-WatchdogLog -Message "State saved for recovery: $($projectStates.Count) projects" -Level "Info"
+    }
+    catch {
+        Write-Warning "Failed to save watchdog state: $_"
+        Write-WatchdogLog -Message "State save error: $_" -Level "Error"
     }
 }
 
@@ -378,14 +671,19 @@ function Cleanup-WatchdogResources {
         Write-Verbose "Saved final statistics to $statsPath"
     }
 
-    # Log session summary
+    # Log session summary (enhanced with WI-3.2 metrics)
     $duration = (Get-Date) - $global:WatchdogStartTime
     Write-Host "`n📊 Session Summary:" -ForegroundColor Cyan
     Write-Host "   Duration: $([math]::Round($duration.TotalHours, 2)) hours" -ForegroundColor Gray
+    Write-Host "   Cycles Completed: $($global:WatchdogStats.CyclesCompleted)" -ForegroundColor Gray
     Write-Host "   Projects Processed: $($global:WatchdogStats.ProjectsProcessed)" -ForegroundColor Gray
     Write-Host "   Decisions Made: $($global:WatchdogStats.DecisionsMade)" -ForegroundColor Gray
     Write-Host "   Commands Sent: $($global:WatchdogStats.CommandsSent)" -ForegroundColor Gray
     Write-Host "   Errors Encountered: $($global:WatchdogStats.ErrorsEncountered)" -ForegroundColor Gray
+    Write-Host "`n📈 Resource Usage:" -ForegroundColor Cyan
+    Write-Host "   Average CPU: $([math]::Round($global:WatchdogStats.AverageCpuPercent, 2))%" -ForegroundColor Gray
+    Write-Host "   Peak Memory: $($global:WatchdogStats.PeakMemoryMB) MB" -ForegroundColor Gray
+    Write-Host "   Last Cycle Duration: $([math]::Round($global:WatchdogStats.LastCycleDuration, 2))s" -ForegroundColor Gray
 
     # Perform log rotation
     try {
