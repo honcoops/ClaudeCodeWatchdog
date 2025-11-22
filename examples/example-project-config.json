@@ -1,0 +1,144 @@
+{
+  "projectName": "example-project",
+  "repoPath": "C:/repos/example-project",
+  "repoUrl": "github.com/username/example-project",
+  "branch": "main",
+  
+  "automation": {
+    "autoCommit": true,
+    "autoProgress": true,
+    "maxRunDuration": "8h",
+    "stallThreshold": "10m"
+  },
+  
+  "humanInLoop": {
+    "requiresApprovalFor": [
+      "database-schema-changes",
+      "API-breaking-changes",
+      "security-sensitive-changes",
+      "production-deployments"
+    ],
+    "requiresHumanAfter": [
+      "compilation-errors",
+      "test-failures",
+      "merge-conflicts",
+      "unclear-requirements"
+    ]
+  },
+  
+  "skills": [
+    "/mnt/skills/user/workstream-planning",
+    "/mnt/skills/user/sprint-planning-documentation",
+    "/mnt/skills/user/type-error-resolution",
+    "/mnt/skills/user/compilation-error-resolution",
+    "/mnt/skills/user/lint-error-resolution",
+    "/mnt/skills/user/sql-query-optimization",
+    "/mnt/skills/user/api-documentation",
+    "/mnt/skills/user/readme-generator",
+    "/mnt/skills/user/troubleshooting-guide-generator"
+  ],
+  
+  "phases": [
+    {
+      "name": "requirements-analysis",
+      "description": "Parse requirements.md and create initial project plan",
+      "autoProgress": false,
+      "estimatedDuration": "1h",
+      "entryCommand": "Read requirements.md and create a comprehensive project plan",
+      "exitCriteria": [
+        "Project plan created",
+        "Workstreams identified",
+        "Dependencies mapped"
+      ]
+    },
+    {
+      "name": "workstream-planning",
+      "description": "Break down into parallel workstreams using skill",
+      "autoProgress": true,
+      "estimatedDuration": "30m",
+      "entryCommand": "Use workstream-planning skill to decompose this project into parallel workstreams",
+      "exitCriteria": [
+        "Workstreams documented",
+        "Resource allocation complete",
+        "Timeline estimated"
+      ]
+    },
+    {
+      "name": "implementation",
+      "description": "Execute development tasks",
+      "autoProgress": true,
+      "estimatedDuration": "6h",
+      "entryCommand": "Begin implementation according to the workstream plan",
+      "exitCriteria": [
+        "All code written",
+        "Compilation successful",
+        "Linting passed"
+      ]
+    },
+    {
+      "name": "testing",
+      "description": "Run tests and fix issues",
+      "autoProgress": false,
+      "estimatedDuration": "2h",
+      "entryCommand": "Run all tests and document results",
+      "exitCriteria": [
+        "All tests passing",
+        "Code coverage >80%",
+        "Integration tests pass"
+      ]
+    },
+    {
+      "name": "documentation",
+      "description": "Generate documentation",
+      "autoProgress": true,
+      "estimatedDuration": "1h",
+      "entryCommand": "Generate comprehensive documentation using readme-generator and api-documentation skills",
+      "exitCriteria": [
+        "README.md complete",
+        "API docs generated",
+        "Troubleshooting guide created"
+      ]
+    }
+  ],
+  
+  "commitStrategy": {
+    "frequency": "phase-completion",
+    "batchSize": "auto",
+    "branchNaming": "claude/{phase-name}-{timestamp}",
+    "prCreation": "phase-completion",
+    "autoMerge": false,
+    "commitMessageTemplate": "feat: {phase-name} - {summary}"
+  },
+  
+  "costThresholds": {
+    "dailyWarning": 5.00,
+    "dailyLimit": 10.00,
+    "weeklyLimit": 50.00,
+    "monthlyLimit": 200.00
+  },
+  
+  "notifications": {
+    "onError": true,
+    "onPhaseComplete": true,
+    "onProjectComplete": true,
+    "onHumanNeeded": true,
+    "onCostThreshold": true,
+    "dailySummary": true,
+    "summaryTime": "17:00"
+  },
+  
+  "monitoring": {
+    "healthCheckInterval": "5m",
+    "stallDetectionThreshold": "10m",
+    "maxIdleTime": "30m",
+    "progressUpdateInterval": "15m"
+  },
+  
+  "recovery": {
+    "autoRestart": true,
+    "maxRestartAttempts": 3,
+    "restartDelay": "5m",
+    "preserveState": true,
+    "notifyOnRecovery": true
+  }
+}
